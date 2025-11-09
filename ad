@@ -1,0 +1,127 @@
+// ==UserScript==
+// @name         Spotify Ad Skipper (Ulepszona Wersja)
+// @version      2.0
+// @namespace    http://tampermonkey.net/
+// @description  Wykrywa i pomija reklamy na Spotify przez wyciszanie i przewijanie
+// @match        https://*.spotify.com/*
+// @grant        none
+// @run-at       document-start
+// @downloadURL  https://gist.githubusercontent.com/Simonwep/24f8cdcd6d32d86e929004013bd660ae/raw
+// @updateURL    https://gist.githubusercontent.com/Simonwep/24f8cdcd6d32d86e929004013bd660ae/raw
+// ==/UserScript==
+
+!async function () {
+
+    /**
+     * Asynchronicznie czeka na pojawienie się elementu w DOM.
+     * @param {string} query - Selektor CSS.
+     * @returns {Promise<Element>}
+     */
+    async function queryAsync(query) {
+        return new Promise(resolve => {
+            const interval = setInterval(() => {
+                const element = document.querySelector(query);
+                if (element) {
+                    clearInterval(interval);
+                    return resolve(element);
+                }
+            }, 250);
+        });
+    }
+
+    /**
+     * Wstrzykuje middleware w metodę obiektu.
+     * (Zachowane z oryginału do przechwycenia elementu audio)
+     */
+    function inject({ctx, fn, middleware, transform}) {
+        const original = ctx[fn];
+        ctx[fn] = function () {
+            if (!middleware || middleware.call(this, ...arguments) !== false) {
+                const result = original.call(this, ...arguments);
+                return transform ? transform.call(this, result, ...arguments) : result;
+            }
+        };
+    }
+
+    // --- Przechwytywanie elementu <audio> ---
+    let audio;
+    inject({
+        ctx: document,
+        fn: 'createElement',
+        transform(result, type) {
+            if (type === 'audio') {
+                audio = result;
+                // Upewnijmy się, że od razu mamy wyciszenie, jeśli reklama już leci
+                handleAdState();
+            }
+            return result;
+        }
+    });
+
+    // --- Główna logika detekcji reklam ---
+
+    let isAdPlaying = false;
+
+    /**
+     * Sprawdza stan reklamy i odpowiednio reaguje.
+     */
+    function handleAdState() {
+        if (!audio) {
+            // Element audio jeszcze nie istnieje
+            return;
+        }
+
+        // Używamy bardziej stabilnych selektorów `data-testid`
+        const nextButton = document.querySelector('[data-testid="control-button-skip-forward"]');
+        const adIndicator = document.querySelector('[data-testid="now-playing-widget-ad-indicator"]');
+
+        // Reklama jest odtwarzana, jeśli przycisk "Dalej" jest wyłączony LUB
+        // widoczny jest wskaźnik reklamy.
+        const currentlyIsAd = (nextButton && nextButton.disabled) || adIndicator;
+
+        if (currentlyIsAd && !isAdPlaying) {
+            // Reklama właśnie się zaczęła
+            isAdPlaying = true;
+            audio.muted = true;
+            audio.playbackRate = 16.0; // Przyspieszamy reklamę
+            // console.log('Reklama wykryta: Wyciszam i przewijam');
+        } else if (!currentlyIsAd && isAdPlaying) {
+            // Reklama właśnie się skończyła
+            isAdPlaying = false;
+            audio.muted = false;
+            audio.playbackRate = 1.0; // Przywracamy normalną prędkość
+            // console.log('Koniec reklamy: Dźwięk przywrócony');
+        } else if (isAdPlaying) {
+            // Upewnienie się, że reklama pozostaje wyciszona/przyspieszona
+            if (audio.muted === false) audio.muted = true;
+            if (audio.playbackRate !== 16.0) audio.playbackRate = 16.0;
+        }
+    }
+
+    // Czekamy na załadowanie paska odtwarzania
+    const nowPlayingBar = await queryAsync('[data-testid="now-playing-bar"]');
+
+    // Obserwujemy zmiany w pasku odtwarzania (np. zmiana utworu)
+    const observer = new MutationObserver(handleAdState);
+    observer.observe(nowPlayingBar, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['disabled', 'class', 'href'] // Filtrujemy, by nie reagować na wszystko
+    });
+
+    // Ukrywanie przycisku "Upgrade" i innych niechcianych elementów
+    const style = document.createElement('style');
+    style.innerHTML = `
+        [aria-label="Upgrade to Premium"],
+        [data-testid="premium-upsell-link"],
+        /* Ukrywa wyskakujące okienka (np. o ciasteczkach lub "Got it") */
+        body > div[aria-modal="true"]:not(#main) {
+            display: none !important;
+        }
+    `;
+    document.head.appendChild(style);
+
+    // Pierwsze sprawdzenie na wypadek, gdyby skrypt załadował się w trakcie reklamy
+    handleAdState();
+}();
